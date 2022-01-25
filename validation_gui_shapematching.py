@@ -18,73 +18,80 @@ import librosa
 
 #%% user input
 
-# the folder conatining the audio data 
-audio_folder=r'I:\postdoc_krill\pam\2016_aural'
+os.chdir(r'D:\passive_acoustics\detector_delevopment\final_detections')
 
-# the code for date and time information in the files
-timecode='aural_%Y_%m_%d_%H_%M_%S.wav'
 
-# the pathto the csv file containg the detection timestamps
-detectioncsv=r"C:\Users\a5278\Documents\passive_acoustics\detector_delevopment\specgram_corr\automaticdetections_dcall_full_2016.csv"
+# if yoy have load the dtection dataframe already:
+sm=pd.read_hdf(r"D:\passive_acoustics\detector_delevopment\final_detections\shapematching2016.h5")
+
+# if you have the raw shapematcing .csvs only
+folder=r'D:\passive_acoustics\detector_delevopment\final_detections\shapematching2016\*.csv'
+sm=pd.DataFrame()
+csv_names=glob.glob(folder)
+for path in csv_names:
+    smnew=pd.read_csv(path)   
+    ix_score=np.char.endswith( list(smnew.columns.values),'score')
+    ix=np.where(np.sum( smnew.iloc[:,ix_score]>0 ,axis=1))[0]
+    sm=pd.concat([sm,smnew.loc[ix,:]],ignore_index=True)
+sm['realtime']=pd.to_datetime(sm['realtime'])
+# sm.to_hdf('shapematching2016.h5', key='df', mode='w')
+
+# sort out the detecions you want
+ix=np.where( sm['dcall_score']>0.3 )[0]
+detections=  sm.loc[ix,:]
+detections=detections.reset_index(drop=True)
+detections['realtime']=pd.to_datetime(detections['realtime'])
+detections['score']=detections['dcall_score']
 
 # the space left and right of the detection in the plor (in seconds)
 offset_sec=10 
+offset_f=30 
 
 # the frequency limits of the spectrogram
-f_lim=[15,150]
+# f_lim=[15,150]
 
 # the spectrogram resolution
-fft_size=2**14
+fft_size=2**15
 
 # if yo have already labeled parts of the detections, specify the path to your old csv file here
 # old_csv='detection_validations.csv'
 
 
-#%% load audio
+#%% load spectrogram images
 
-# audio_folder=r'I:\postdoc_krill\pam\2016_aural'
-audiopaths=glob.glob(audio_folder+'\*.wav')
-audiostarttimes=[]
+detections_spectrog={}
+detections_extent={}
 
-audioduration=[]
+audiopath_old='3254dsanaswqe'
+for ix in range(len(detections)):
+ 
+     audiopath=detections.loc[ix,'filename']
 
-for audiopath in audiopaths:         
-    # print(audiopath)    
-    audiostarttimes.append( dt.datetime.strptime( audiopath.split('\\')[-1], timecode ) )
-    # x,fs=sf.read(audiopath,dtype='int16')
-    # duration=len(x)/fs
-    audioduration.append(    librosa.get_duration(filename=audiopath) )
-
-audiostarttimes=pd.Series(audiostarttimes)     
-audioduration=pd.Series(audioduration)     
-audioendtimes= audiostarttimes + pd.to_timedelta(audioduration,'s')
-
-#%% load detections
-
-# detectioncsv=r"C:\Users\a5278\Documents\passive_acoustics\detector_delevopment\specgram_corr\automaticdetections_dcall_full_2016.csv"
-df=pd.read_csv(detectioncsv)    
-detections=  pd.to_datetime(df.iloc[:,1])
-
-# or something like:
-    
-# detections=[]
-# csv_names=glob.glob(folder)
-# for path in csv_names:
-#     df=pd.read_csv(path)
-#     ix=df['Label']=='BW_D_call'
-#     detections.append(df['Timestamp'][ix])
-# detections = pd.concat(detections,ignore_index=True)
-# detections=pd.to_datetime(detections)   
-
-# assign audiopath to each detection
-detections_af=[]
-for detec in detections:
-    ix = np.where( (detec>audiostarttimes) & (detec<audioendtimes)  )[0][0]
-    detections_af.append(  audiopaths[ix]  )
+     if not audiopath==audiopath_old:     
+         x, fs = sf.read(audiopath,dtype='int16')    
+         f, t, Sxx = signal.spectrogram(x, fs, window='hamming',nperseg=fft_size,noverlap=fft_size*0.9)
+         print(audiopath)
+                   
+     t1=detections.loc[ix,'t-1'] - offset_sec
+     if t1<0:
+         t1=0
+     t2=detections.loc[ix,'t-2'] + offset_sec
+     if t2>t[-1]:
+         t12=t[-1]
+     f1=detections.loc[ix,'f-1'] - offset_f
+     f2=detections.loc[ix,'f-2'] + offset_f
+     
+     ix_t=np.where( (t>=t1) & (t<=t2) )[0]
+     ix_f=np.where((f>=f1) & (f<=f2))[0]
+     spectrog =10*np.log10( Sxx[ ix_f[0]:ix_f[-1],ix_t[0]:ix_t[-1] ] )
+     
+     detections_spectrog[ix]=spectrog
+     detections_extent[ix]=[t1,t2,f1,f2]    
+     audiopath_old=audiopath
 
 #%% set labels and load labels from previous session
 
-labels=np.ones(np.shape(detections))*np.nan
+labels=np.ones(len(detections))*np.nan
 
 if ('old_csv' in locals()):
     a=pd.read_csv(old_csv, index_col=0)
@@ -117,7 +124,7 @@ class MainWindow(QtWidgets.QMainWindow):
        ##############
         self.audiopath_old='jkbfaa'
         
-        self.detections_af=detections_af
+        # self.detections_af=detections_af
         self.detections=detections
         self.labels=labels
         self.ixnan=np.where(pd.Series(self.labels).isna())[0]
@@ -125,37 +132,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ix=self.ixnan[self.ii]
         
         def plot_detection():
-            self.audiopath=self.detections_af[self.ix]
-            if self.ii>0:
-                   self.audiopath_old=self.detections_af[self.ixnan[self.ii-1]]
+  
+            detection_time=self.detections.loc[self.ix,'realtime']
          
-            if not self.audiopath==self.audiopath_old:     
-                x, fs = sf.read(self.audiopath,dtype='int16')   
-                audiostarttime= dt.datetime.strptime( self.audiopath.split('\\')[-1],timecode) 
-        
-                fft_size=2**14
-                self.f, self.t, self.Sxx = signal.spectrogram(x, fs, window='hamming',nperseg=fft_size,noverlap=fft_size*0.9)
-                self.rectime=audiostarttime + pd.to_timedelta( self.t ,'s')
-                        
-            detection_time=self.detections[self.ix]
-            # print(detection_time)
-            # print(self.rectime)
      
             self.canvas.fig.clf() 
             self.canvas.axes = self.canvas.fig.add_subplot(111)
             
-            t1=detection_time - pd.Timedelta(offset_sec,'s')
-            t2=detection_time + pd.Timedelta(offset_sec,'s')          
-            ix_t=np.where( (self.rectime>=t1) & (self.rectime<=t2) )[0]
-            ix_f=np.where((self.f>=f_lim[0]) & (self.f<=f_lim[1]))[0]
-            spectrog =10*np.log10( self.Sxx[ ix_f[0]:ix_f[-1],ix_t[0]:ix_t[-1] ] )
+            spectrog = detections_spectrog[self.ix]
             
-            self.canvas.axes.imshow(spectrog ,cmap='inferno',aspect='auto',origin = 'lower',extent = [self.t[ix_t[0]],self.t[ix_t[-1]] , f_lim[0], f_lim[-1]])
+            self.canvas.axes.imshow(spectrog ,cmap='inferno',aspect='auto',origin = 'lower',extent = detections_extent[self.ix] )
             self.canvas.axes.set_ylabel('Frequency [Hz]')
             self.canvas.axes.set_xlabel('Time [sec]')
               
-            td=np.argmin(np.abs(self.rectime-detection_time))
-            self.canvas.axes.plot([self.t[td],self.t[td]], f_lim , '--k')
+            # td=np.argmin(np.abs(self.rectime-detection_time))
+            
+            xx=[ self.detections.loc[self.ix,'t-1'],self.detections.loc[self.ix,'t-2'],self.detections.loc[self.ix,'t-2'],self.detections.loc[self.ix,'t-1'],self.detections.loc[self.ix,'t-1'] ]
+            yy=[ self.detections.loc[self.ix,'f-1'],self.detections.loc[self.ix,'f-1'],self.detections.loc[self.ix,'f-2'],self.detections.loc[self.ix,'f-2'],self.detections.loc[self.ix,'f-1']]
+            
+            self.canvas.axes.plot(xx,yy , '-k')
+            self.canvas.axes.text(self.detections.loc[self.ix,'t-1'],self.detections.loc[self.ix,'f-2'],str(self.detections.loc[self.ix,'score'].round(2)) ,color= 'k')
+            
             # self.canvas.axes.arrow(self.t[td], 100, 0,-20, length_includes_head=True,
             #       width=1)
             
@@ -175,13 +172,12 @@ class MainWindow(QtWidgets.QMainWindow):
             plot_detection()
             self.labels[self.ix]=1
             self.ii=self.ii+1  
-            self.ix=self.ixnan[self.ii]
-
-            if self.ii>=len(self.ixnan):
-                self.ii=len(self.ixnan)-1
+            if self.ii>=len(self.labels):
+                self.ii=len(self.labels)-1
                 print('THE END')
-            # export data
-            annot=pd.concat([self.detections,pd.Series(self.labels)],axis=1,ignore_index=True)
+            self.ix=self.ixnan[self.ii]
+        # export data
+            annot=pd.concat([self.detections['realtime'],pd.Series(self.labels)],axis=1,ignore_index=True)
             annot.to_csv('detection_validations.csv')
             
         button_yes.clicked.connect(yes_func)     
@@ -194,11 +190,11 @@ class MainWindow(QtWidgets.QMainWindow):
             plot_detection()
             self.labels[self.ix]=0
             self.ii=self.ii+1  
-            self.ix=self.ixnan[self.ii]
-            if self.ii>=len(self.ixnan):
-                self.ii=len(self.ixnan)-1
+            if self.ii>=len(self.labels):
+                self.ii=len(self.labels)-1
                 print('THE END')
-            # export data
+            self.ix=self.ixnan[self.ii]
+# export data
             annot=pd.concat([self.detections,pd.Series(self.labels)],axis=1,ignore_index=True)
             annot.to_csv('detection_validations.csv')    
         button_no.clicked.connect(no_func)    
@@ -208,11 +204,11 @@ class MainWindow(QtWidgets.QMainWindow):
         button_previous=QtWidgets.QPushButton('<--Previous')
         def previous_func():    
             self.ii=self.ii-1  
+            if self.ii<0:
+                self.ii=0
             self.ix=self.ixnan[self.ii]
-            if self.ix<0:
-                self.ix=0
             plot_detection()
-            self.labels[self.ix]=0
+            # self.labels[self.ix]=0
             print(self.labels)
             self.ix=self.ix+1           
         button_previous.clicked.connect(previous_func)    
@@ -221,11 +217,14 @@ class MainWindow(QtWidgets.QMainWindow):
         button_next=QtWidgets.QPushButton('Next-->')
         def next_func():    
             self.ii=self.ii+1  
+            if self.ii>=len(self.labels):
+                self.ii=len(self.labels)-1
+                print('THE END')
             self.ix=self.ixnan[self.ii]
             if self.ix<0:
                 self.ix=0
             plot_detection()
-            self.labels[self.ix]=0
+            # self.labels[self.ix]=0
             print(self.labels)
             self.ix=self.ix+1           
         button_next.clicked.connect(next_func)    
